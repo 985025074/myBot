@@ -4,7 +4,7 @@ mod openai_compatible;
 use std::time::Duration;
 
 use reqwest::blocking::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     app::AppResult,
@@ -14,7 +14,7 @@ use crate::{
 pub use anthropic::AnthropicClient;
 pub use openai_compatible::OpenAiCompatibleClient;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
@@ -62,27 +62,74 @@ impl LlmClient {
         }
     }
 
+    #[allow(dead_code)]
     pub fn send_chat(&self, history: &[ChatMessage]) -> AppResult<String> {
+        self.send_chat_streaming(history, |_| Ok(()))
+    }
+
+    pub fn send_chat_streaming(
+        &self,
+        history: &[ChatMessage],
+        on_chunk: impl FnMut(&str) -> AppResult<()>,
+    ) -> AppResult<String> {
         match &self.provider {
-            ProviderClient::OpenAiCompatible(client) => client.send_chat(history),
-            ProviderClient::Anthropic(client) => client.send_chat(history),
+            ProviderClient::OpenAiCompatible(client) => client.send_chat_streaming(history, on_chunk),
+            ProviderClient::Anthropic(client) => client.send_chat_streaming(history, on_chunk),
         }
     }
 }
 
 fn missing_api_key_error(env_name: &str) -> String {
     format!(
-        "Missing API key. Set the {env_name} environment variable or add api_key in config/llm.toml."
+        "Missing API key. Set the {env_name} environment variable or place it in the active scope .mybot/.env file."
     )
 }
 
 fn extract_text_parts(parts: &[TextPart]) -> String {
-    parts
-        .iter()
-        .filter(|part| part.kind.as_deref().unwrap_or("text") == "text")
-        .filter_map(|part| part.text.clone())
-        .collect::<Vec<_>>()
-        .join("")
+    let mut output = String::new();
+
+    for part in parts {
+        let kind = part.kind.as_deref().unwrap_or("text");
+        match kind {
+            "thinking" => {
+                if let Some(thinking) = part
+                    .thinking
+                    .as_deref()
+                    .or(part.reasoning_content.as_deref())
+                    .or(part.text.as_deref())
+                {
+                    output.push_str(&wrap_thinking_text(thinking));
+                }
+            }
+            "reasoning" | "reasoning_content" => {
+                if let Some(reasoning) = part
+                    .reasoning_content
+                    .as_deref()
+                    .or(part.thinking.as_deref())
+                    .or(part.text.as_deref())
+                {
+                    output.push_str(&wrap_thinking_text(reasoning));
+                }
+            }
+            _ => {
+                if let Some(text) = part.text.as_deref() {
+                    output.push_str(text);
+                } else if let Some(reasoning) = part.reasoning_content.as_deref() {
+                    output.push_str(&wrap_thinking_text(reasoning));
+                }
+            }
+        }
+    }
+
+    output
+}
+
+fn wrap_thinking_text(text: &str) -> String {
+    if text.trim().is_empty() {
+        return String::new();
+    }
+
+    format!("<think>\n{}\n</think>", text.trim_end())
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -100,4 +147,8 @@ struct TextPart {
     #[serde(rename = "type")]
     kind: Option<String>,
     text: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }

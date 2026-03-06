@@ -3,6 +3,7 @@ use std::{
     io::Read,
     path::Path,
     process::{Command, Stdio},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,10 +16,11 @@ use walkdir::WalkDir;
 
 use crate::{
     app::AppResult,
+    skills::SkillStore,
     tools::{Tool, ToolContext, ToolDefinition, ToolOutput, ToolRegistry},
 };
 
-pub fn register_builtin_tools(registry: &mut ToolRegistry) {
+pub fn register_builtin_tools(registry: &mut ToolRegistry, skills: Arc<SkillStore>) {
     registry.register(ListFilesTool);
     registry.register(GlobFilesTool);
     registry.register(FileStatTool);
@@ -30,6 +32,7 @@ pub fn register_builtin_tools(registry: &mut ToolRegistry) {
     registry.register(ApplyPatchTool);
     registry.register(GrepTextTool);
     registry.register(RunCommandTool);
+    registry.register(SkillTool { skills });
 }
 
 struct ListFilesTool;
@@ -43,6 +46,9 @@ struct WriteFileTool;
 struct ApplyPatchTool;
 struct GrepTextTool;
 struct RunCommandTool;
+struct SkillTool {
+    skills: Arc<SkillStore>,
+}
 
 #[derive(Debug, Deserialize)]
 struct ListFilesInput {
@@ -136,6 +142,11 @@ struct RunCommandInput {
     path: String,
     #[serde(default = "default_timeout_seconds")]
     timeout_seconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillInput {
+    name: String,
 }
 
 impl Tool for ListFilesTool {
@@ -735,6 +746,52 @@ impl Tool for RunCommandTool {
                 "exit_code": status.code(),
                 "stdout": truncate_output(&stdout),
                 "stderr": truncate_output(&stderr),
+            }),
+        })
+    }
+}
+
+impl Tool for SkillTool {
+    fn definition(&self) -> ToolDefinition {
+        let description = if self.skills.is_empty() {
+            "Load a reusable skill instruction by name. No skills are currently available.".to_string()
+        } else {
+            format!(
+                "Load a reusable skill instruction by name. Available skills:\n{}",
+                self.skills.summary_block()
+            )
+        };
+
+        ToolDefinition {
+            name: "skill".to_string(),
+            description,
+            input_schema: json!({
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                    "name": {"type": "string", "description": "Skill name to load"}
+                }
+            }),
+        }
+    }
+
+    fn run(&self, input: Value, _context: &ToolContext) -> AppResult<ToolOutput> {
+        let input: SkillInput = serde_json::from_value(input)?;
+        let skill = self
+            .skills
+            .get(&input.name)
+            .ok_or_else(|| format!("unknown skill: {}", input.name))?;
+
+        Ok(ToolOutput {
+            summary: format!("loaded skill {}", skill.name),
+            content: json!({
+                "name": skill.name,
+                "description": skill.description,
+                "license": skill.license,
+                "compatibility": skill.compatibility,
+                "metadata": skill.metadata,
+                "path": skill.path.to_string_lossy(),
+                "content": skill.content,
             }),
         })
     }

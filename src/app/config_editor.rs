@@ -403,13 +403,13 @@ fn fields_from_config(profile_name: &str, config: &LlmConfig) -> Vec<ConfigField
         ConfigField {
             id: ConfigFieldId::ApiKeyEnv,
             label: "api_key_env",
-            help: "用于读取 API key 的环境变量名。Aliyun Coding Plan 可用 BAILIAN_CODING_PLAN_API_KEY。",
+            help: "用于读取 API key 的环境变量名。推荐把真实 key 放到当前 scope 的 .mybot/.env 中；Aliyun Coding Plan 可用 BAILIAN_CODING_PLAN_API_KEY。",
             value: config.api_key_env.clone(),
         },
         ConfigField {
             id: ConfigFieldId::ApiKey,
             label: "api_key",
-            help: "可直接写入 API key；留空则优先走环境变量。",
+            help: "不推荐直接写入。建议留空，并通过当前 scope 的 .mybot/.env + api_key_env 提供密钥。",
             value: config.api_key.clone().unwrap_or_default(),
         },
         ConfigField {

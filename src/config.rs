@@ -44,10 +44,17 @@ pub enum PermissionMode {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum PermissionRule {
+    Mode(PermissionMode),
+    Patterns(HashMap<String, PermissionMode>),
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct ToolPermissionConfig {
     pub default: PermissionMode,
-    pub tools: HashMap<String, PermissionMode>,
+    pub tools: HashMap<String, PermissionRule>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -66,13 +73,18 @@ pub enum Action {
     DeleteForward,
     InsertNewline,
     SubmitInput,
+    AutocompleteCommand,
     ClearInput,
     OpenConfig,
     SaveConfig,
     CloseConfig,
     ConfigNextField,
     ConfigPreviousField,
+    ToggleThinking,
+    ToggleToolDetails,
     ApproveTool,
+    AlwaysAllowTool,
+    AlwaysDenyTool,
     RejectTool,
 }
 
@@ -111,13 +123,18 @@ struct KeyBindingsFile {
     delete_forward: Vec<String>,
     insert_newline: Vec<String>,
     submit_input: Vec<String>,
+    autocomplete_command: Vec<String>,
     clear_input: Vec<String>,
     open_config: Vec<String>,
     save_config: Vec<String>,
     close_config: Vec<String>,
     config_next_field: Vec<String>,
     config_previous_field: Vec<String>,
+    toggle_thinking: Vec<String>,
+    toggle_tool_details: Vec<String>,
     approve_tool: Vec<String>,
+    always_allow_tool: Vec<String>,
+    always_deny_tool: Vec<String>,
     reject_tool: Vec<String>,
 }
 
@@ -164,13 +181,18 @@ impl KeyBindings {
             (Action::DeleteForward, config.delete_forward),
             (Action::InsertNewline, config.insert_newline),
             (Action::SubmitInput, config.submit_input),
+            (Action::AutocompleteCommand, config.autocomplete_command),
             (Action::ClearInput, config.clear_input),
             (Action::OpenConfig, config.open_config),
             (Action::SaveConfig, config.save_config),
             (Action::CloseConfig, config.close_config),
             (Action::ConfigNextField, config.config_next_field),
             (Action::ConfigPreviousField, config.config_previous_field),
+            (Action::ToggleThinking, config.toggle_thinking),
+            (Action::ToggleToolDetails, config.toggle_tool_details),
             (Action::ApproveTool, config.approve_tool),
+            (Action::AlwaysAllowTool, config.always_allow_tool),
+            (Action::AlwaysDenyTool, config.always_deny_tool),
             (Action::RejectTool, config.reject_tool),
         ];
 
@@ -204,7 +226,7 @@ impl LlmConfigStore {
                 return Ok(Self::from_single(config));
             }
 
-            return Err("failed to parse config/llm.toml as profile store or single profile".into());
+            return Err("failed to parse llm config as profile store or single profile".into());
         }
 
         Ok(Self::default())
@@ -220,7 +242,7 @@ impl LlmConfigStore {
             .cloned()
             .ok_or_else(|| {
                 format!(
-                    "active profile '{}' not found in config/llm.toml",
+                    "active profile '{}' not found in llm config",
                     self.active_profile
                 )
                 .into()
@@ -277,8 +299,95 @@ impl ToolPermissionConfig {
         Ok(Self::default())
     }
 
-    pub fn mode_for(&self, tool_name: &str) -> PermissionMode {
-        self.tools.get(tool_name).copied().unwrap_or(self.default)
+    pub fn mode_for(
+        &self,
+        descriptor: &crate::tools::ToolPermissionDescriptor,
+    ) -> PermissionMode {
+        for scope in &descriptor.scopes {
+            let Some(rule) = self.tools.get(scope) else {
+                continue;
+            };
+
+            if let Some(mode) = rule.resolve(&descriptor.subjects) {
+                return mode;
+            }
+        }
+
+        self.default
+    }
+
+    pub fn describe_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!("default = {}", self.default.as_str())];
+
+        let mut scopes = self.tools.iter().collect::<Vec<_>>();
+        scopes.sort_by(|left, right| left.0.cmp(right.0));
+
+        for (scope, rule) in scopes {
+            lines.push(format!("[{scope}]"));
+            lines.extend(rule.describe_lines());
+        }
+
+        lines
+    }
+}
+
+impl PermissionRule {
+    fn resolve(&self, subjects: &[String]) -> Option<PermissionMode> {
+        match self {
+            Self::Mode(mode) => Some(*mode),
+            Self::Patterns(patterns) => {
+                let mut final_mode = None;
+
+                for subject in subjects {
+                    let mut matched = None;
+                    let mut best_score = 0usize;
+
+                    for (pattern, mode) in patterns {
+                        if !permission_pattern_matches(pattern, subject) {
+                            continue;
+                        }
+
+                        let score = pattern.len();
+                        if matched.is_none() || score >= best_score {
+                            matched = Some(*mode);
+                            best_score = score;
+                        }
+                    }
+
+                    let subject_mode = matched?;
+                    final_mode = Some(match (final_mode, subject_mode) {
+                        (Some(current), next) => more_restrictive_mode(current, next),
+                        (None, next) => next,
+                    });
+                }
+
+                final_mode
+            }
+        }
+    }
+
+    fn describe_lines(&self) -> Vec<String> {
+        match self {
+            Self::Mode(mode) => vec![format!("  {}", mode.as_str())],
+            Self::Patterns(patterns) => {
+                let mut entries = patterns.iter().collect::<Vec<_>>();
+                entries.sort_by(|left, right| left.0.cmp(right.0));
+                entries
+                    .into_iter()
+                    .map(|(pattern, mode)| format!("  {pattern} => {}", mode.as_str()))
+                    .collect()
+            }
+        }
+    }
+}
+
+impl PermissionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Ask => "ask",
+            Self::Deny => "deny",
+        }
     }
 }
 
@@ -346,13 +455,18 @@ impl Default for KeyBindingsFile {
             delete_forward: vec!["delete".to_string()],
             insert_newline: vec!["alt+enter".to_string()],
             submit_input: vec!["enter".to_string()],
+            autocomplete_command: vec!["tab".to_string()],
             clear_input: vec!["esc".to_string()],
             open_config: vec!["f2".to_string()],
             save_config: vec!["ctrl+s".to_string()],
             close_config: vec!["esc".to_string()],
             config_next_field: vec!["tab".to_string()],
             config_previous_field: vec!["shift+tab".to_string()],
+            toggle_thinking: vec!["f3".to_string()],
+            toggle_tool_details: vec!["f4".to_string()],
             approve_tool: vec!["y".to_string(), "enter".to_string()],
+            always_allow_tool: vec!["a".to_string()],
+            always_deny_tool: vec!["d".to_string()],
             reject_tool: vec!["n".to_string(), "esc".to_string()],
         }
     }
@@ -384,12 +498,20 @@ impl Default for LlmConfigStore {
 impl Default for ToolPermissionConfig {
     fn default() -> Self {
         let mut tools = HashMap::new();
-        tools.insert("run_command".to_string(), PermissionMode::Ask);
-        tools.insert("write_file".to_string(), PermissionMode::Ask);
-        tools.insert("apply_patch".to_string(), PermissionMode::Ask);
-        tools.insert("delete_path".to_string(), PermissionMode::Ask);
-        tools.insert("move_path".to_string(), PermissionMode::Ask);
-        tools.insert("make_directory".to_string(), PermissionMode::Ask);
+        tools.insert(
+            "run_command".to_string(),
+            PermissionRule::Patterns(HashMap::from([
+                ("*".to_string(), PermissionMode::Ask),
+                ("git *".to_string(), PermissionMode::Allow),
+            ])),
+        );
+        tools.insert(
+            "edit".to_string(),
+            PermissionRule::Patterns(HashMap::from([
+                ("*".to_string(), PermissionMode::Ask),
+                ("src/**".to_string(), PermissionMode::Allow),
+            ])),
+        );
 
         Self {
             default: PermissionMode::Allow,
@@ -458,5 +580,19 @@ fn key_code_matches(expected: &KeyCode, actual: &KeyCode) -> bool {
             expected.eq_ignore_ascii_case(actual)
         }
         _ => expected == actual,
+    }
+}
+
+fn permission_pattern_matches(pattern: &str, subject: &str) -> bool {
+    glob::Pattern::new(pattern)
+        .map(|compiled| compiled.matches(subject))
+        .unwrap_or(false)
+}
+
+fn more_restrictive_mode(left: PermissionMode, right: PermissionMode) -> PermissionMode {
+    match (left, right) {
+        (PermissionMode::Deny, _) | (_, PermissionMode::Deny) => PermissionMode::Deny,
+        (PermissionMode::Ask, _) | (_, PermissionMode::Ask) => PermissionMode::Ask,
+        _ => PermissionMode::Allow,
     }
 }

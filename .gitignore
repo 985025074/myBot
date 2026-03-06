@@ -1,0 +1,6 @@
+target
+.mybot/.env
+.mybot/current.json
+.mybot/sessions/
+.mybot
+.env
